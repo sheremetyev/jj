@@ -151,3 +151,6 @@ similar.opt-level = 3
 [profile.release]
 strip = "debuginfo"
 codegen-units = 1
+
+[patch.crates-io]
+tokio = { git = "https://github.com/sheremetyev/tokio.git", branch = "push-qzqvwmzrmvpt" }
