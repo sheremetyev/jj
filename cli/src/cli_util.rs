@@ -1136,32 +1136,52 @@ impl WorkspaceCommandHelper {
     #[instrument(skip_all)]
     fn import_git_head(&mut self, ui: &Ui) -> Result<(), CommandError> {
         assert!(self.may_update_working_copy);
-        let mut tx = self.start_transaction();
+
+        // Extract values needed before acquiring lock
+        let old_op_id = self.repo().op_id().clone();
+        let workspace_name = self.workspace_name().to_owned();
+        let repo = self.repo().clone();
+
+        // Acquire lock BEFORE reading Git HEAD to prevent races
+        let mut locked_ws = self.workspace.start_working_copy_mutation()?;
+
+        // Check if another process already updated the working copy while we were
+        // waiting for the lock. If so, reload the repo at the new operation to
+        // avoid creating divergent operations.
+        let wc_operation_id = locked_ws.locked_wc().old_operation_id().clone();
+        let repo = if wc_operation_id != old_op_id {
+            // The WC operation differs from what we loaded. Another process created
+            // a new operation and updated the WC, so we need to reload at the WC
+            // operation to avoid creating divergent operations.
+            let wc_operation = repo.loader().load_operation(&wc_operation_id)?;
+            repo.reload_at(&wc_operation)?
+        } else {
+            repo
+        };
+
+        // Start transaction with the (possibly reloaded) repo
+        let mut tx = start_repo_transaction(&repo, &self.env.command.string_args().clone());
+
         jj_lib::git::import_head(tx.repo_mut())?;
         if !tx.repo().has_changes() {
+            // Git HEAD matches our view, no import needed
+            // Check if we reloaded to a different operation
+            let did_reload = repo.op_id() != &old_op_id;
+            locked_ws.finish(wc_operation_id)?;
+            if did_reload {
+                // We reloaded the repo, update our view
+                self.user_repo = ReadonlyUserRepo::new(repo);
+            }
             return Ok(());
         }
 
-        // TODO: There are various ways to get duplicated working-copy
-        // commits. Some of them could be mitigated by checking the working-copy
-        // operation id after acquiring the lock, but that isn't enough.
-        //
-        // - moved HEAD was observed by multiple jj processes, and new working-copy
-        //   commits are created concurrently.
-        // - new HEAD was exported by jj, but the operation isn't committed yet.
-        // - new HEAD was exported by jj, but the new working-copy commit isn't checked
-        //   out yet.
-
-        let mut tx = tx.into_inner();
-        let old_git_head = self.repo().view().git_head().clone();
+        let old_git_head = repo.view().git_head().clone();
         let new_git_head = tx.repo().view().git_head().clone();
         if let Some(new_git_head_id) = new_git_head.as_normal() {
-            let workspace_name = self.workspace_name().to_owned();
             let new_git_head_commit = tx.repo().store().get_commit(new_git_head_id)?;
             let wc_commit = tx
                 .repo_mut()
                 .check_out(workspace_name, &new_git_head_commit)?;
-            let mut locked_ws = self.workspace.start_working_copy_mutation()?;
             // The working copy was presumably updated by the git command that updated
             // HEAD, so we just need to reset our working copy
             // state to it without updating working copy files.
@@ -1179,7 +1199,9 @@ impl WorkspaceCommandHelper {
             }
         } else {
             // Unlikely, but the HEAD ref got deleted by git?
-            self.finish_transaction(ui, tx, "import git head")?;
+            let new_repo = tx.commit("import git head")?;
+            locked_ws.finish(new_repo.op_id().clone())?;
+            self.user_repo = ReadonlyUserRepo::new(new_repo);
         }
         Ok(())
     }

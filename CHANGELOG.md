@@ -18,6 +18,10 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed bugs
 
+* Fixed race condition that could cause divergent operations when multiple jj
+  processes concurrently import/export Git HEAD in colocated repositories.
+  [#6830](https://github.com/jj-vcs/jj/issues/6830)
+
 ## [0.35.0] - 2025-11-05
 
 ### Release highlights
