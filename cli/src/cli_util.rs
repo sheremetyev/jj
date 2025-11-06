@@ -2065,12 +2065,30 @@ See https://jj-vcs.github.io/jj/latest/working-copy/#stale-working-copy \
             .map(|commit_id| tx.repo().store().get_commit(commit_id))
             .transpose()?;
 
+        // Determine if we need to acquire the WC lock:
+        // - If we're exporting Git HEAD (colocated repo with new WC commit)
+        // - OR if we're updating the working copy files
+        let mut locked_ws = {
+            let git_head_export =
+                self.working_copy_shared_with_git && maybe_new_wc_commit.is_some();
+            let wc_update = self.may_update_working_copy && maybe_new_wc_commit.is_some();
+            if git_head_export || wc_update {
+                Some(self.workspace.start_working_copy_mutation()?)
+            } else {
+                None
+            }
+        };
+
         #[cfg(feature = "git")]
         if self.working_copy_shared_with_git {
             use std::error::Error as _;
             if let Some(wc_commit) = &maybe_new_wc_commit {
-                // This can fail if HEAD was updated concurrently. In that case,
-                // the actual state will be imported on the next snapshot.
+                // Export Git HEAD while holding the WC lock to prevent races:
+                // - Between two finish_transaction calls updating HEAD
+                // - With import_git_head importing HEAD concurrently
+                // This can still fail if HEAD was updated concurrently by another JJ process
+                // (overlapping transaction) or a non-JJ process (e.g., git checkout). In that
+                // case, the actual state will be imported on the next snapshot.
                 match jj_lib::git::reset_head(tx.repo_mut(), wc_commit) {
                     Ok(()) => {}
                     Err(err @ jj_lib::git::GitResetHeadError::UpdateHeadRef(_)) => {
@@ -2091,7 +2109,7 @@ See https://jj-vcs.github.io/jj/latest/working-copy/#stale-working-copy \
         // don't leave the working copy in a stale state.
         if self.may_update_working_copy {
             if let Some(new_commit) = &maybe_new_wc_commit {
-                let locked_ws = self.workspace.start_working_copy_mutation()?;
+                let locked_ws = locked_ws.expect("locked_ws should be held if updating WC");
                 let stats =
                     update_working_copy_locked(locked_ws, self.user_repo.repo.op_id(), new_commit)?;
                 self.print_updated_working_copy_stats(
@@ -2104,6 +2122,9 @@ See https://jj-vcs.github.io/jj/latest/working-copy/#stale-working-copy \
                 // It seems the workspace was deleted, so we shouldn't try to
                 // update it.
             }
+        } else if let Some(locked_ws) = locked_ws.take() {
+            // We acquired the lock for Git HEAD export but don't need to update WC
+            locked_ws.finish(self.user_repo.repo.op_id().clone())?;
         }
 
         self.report_repo_changes(ui, &old_repo)?;
