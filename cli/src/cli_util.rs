@@ -2091,12 +2091,9 @@ See https://jj-vcs.github.io/jj/latest/working-copy/#stale-working-copy \
         // don't leave the working copy in a stale state.
         if self.may_update_working_copy {
             if let Some(new_commit) = &maybe_new_wc_commit {
-                let stats = update_working_copy(
-                    &self.user_repo.repo,
-                    &mut self.workspace,
-                    maybe_old_wc_commit.as_ref(),
-                    new_commit,
-                )?;
+                let locked_ws = self.workspace.start_working_copy_mutation()?;
+                let stats =
+                    update_working_copy_locked(locked_ws, self.user_repo.repo.op_id(), new_commit)?;
                 self.print_updated_working_copy_stats(
                     ui,
                     maybe_old_wc_commit.as_ref(),
@@ -2847,23 +2844,26 @@ pub fn print_unmatched_explicit_paths<'a>(
     Ok(())
 }
 
-pub fn update_working_copy(
-    repo: &Arc<ReadonlyRepo>,
-    workspace: &mut Workspace,
-    old_commit: Option<&Commit>,
+/// Update the working copy using an already-held lock.
+/// The lock will be finished (consumed) by this function.
+fn update_working_copy_locked(
+    mut locked_ws: jj_lib::workspace::LockedWorkspace,
+    operation_id: &jj_lib::op_store::OperationId,
     new_commit: &Commit,
 ) -> Result<CheckoutStats, CommandError> {
-    let old_tree = old_commit.map(|commit| commit.tree());
     // TODO: CheckoutError::ConcurrentCheckout should probably just result in a
     // warning for most commands (but be an error for the checkout command)
-    let stats = workspace
-        .check_out(repo.op_id().clone(), old_tree.as_ref(), new_commit)
+    let stats = locked_ws
+        .locked_wc()
+        .check_out(new_commit)
+        .block_on()
         .map_err(|err| {
             internal_error_with_message(
                 format!("Failed to check out commit {}", new_commit.id().hex()),
                 err,
             )
         })?;
+    locked_ws.finish(operation_id.clone())?;
     Ok(stats)
 }
 
