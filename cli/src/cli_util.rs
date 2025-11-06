@@ -1972,22 +1972,6 @@ See https://jj-vcs.github.io/jj/latest/working-copy/#stale-working-copy \
         Ok(stats)
     }
 
-    fn update_working_copy(
-        &mut self,
-        ui: &Ui,
-        maybe_old_commit: Option<&Commit>,
-        new_commit: &Commit,
-    ) -> Result<(), CommandError> {
-        assert!(self.may_update_working_copy);
-        let stats = update_working_copy(
-            &self.user_repo.repo,
-            &mut self.workspace,
-            maybe_old_commit,
-            new_commit,
-        )?;
-        self.print_updated_working_copy_stats(ui, maybe_old_commit, new_commit, &stats)
-    }
-
     fn print_updated_working_copy_stats(
         &self,
         ui: &Ui,
@@ -2107,7 +2091,18 @@ See https://jj-vcs.github.io/jj/latest/working-copy/#stale-working-copy \
         // don't leave the working copy in a stale state.
         if self.may_update_working_copy {
             if let Some(new_commit) = &maybe_new_wc_commit {
-                self.update_working_copy(ui, maybe_old_wc_commit.as_ref(), new_commit)?;
+                let stats = update_working_copy(
+                    &self.user_repo.repo,
+                    &mut self.workspace,
+                    maybe_old_wc_commit.as_ref(),
+                    new_commit,
+                )?;
+                self.print_updated_working_copy_stats(
+                    ui,
+                    maybe_old_wc_commit.as_ref(),
+                    new_commit,
+                    &stats,
+                )?;
             } else {
                 // It seems the workspace was deleted, so we shouldn't try to
                 // update it.
