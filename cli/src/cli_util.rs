@@ -2090,6 +2090,7 @@ See https://jj-vcs.github.io/jj/latest/working-copy/#stale-working-copy \
         // Determine if we need to acquire the WC lock:
         // - If we're exporting Git HEAD (colocated repo with new WC commit)
         // - OR if we're updating the working copy files
+        let old_op_id = tx.base_repo().op_id().clone();
         let mut locked_ws = {
             let git_head_export =
                 self.working_copy_shared_with_git && maybe_new_wc_commit.is_some();
@@ -2101,6 +2102,33 @@ See https://jj-vcs.github.io/jj/latest/working-copy/#stale-working-copy \
             }
         };
 
+        // Check if another process already updated the working copy while we were
+        // waiting for the lock. If so, merge the transaction with the new operation
+        // to avoid creating divergent operations.
+        //
+        // This prevents the "Failed to update Git HEAD ref" error that would occur
+        // if we tried to update HEAD based on stale state. By merging with the
+        // concurrent operation, our transaction incorporates those changes and can
+        // safely update Git HEAD with the correct expectations.
+        if let Some(ref mut locked_ws_mut) = locked_ws {
+            let wc_operation_id = locked_ws_mut.locked_wc().old_operation_id().clone();
+            if wc_operation_id != old_op_id {
+                // The WC operation differs from what we loaded. Another process created
+                // a new operation and updated the WC, so we need to merge our transaction
+                // with the new operation to avoid creating divergent operations.
+                let wc_operation = tx.base_repo().loader().load_operation(&wc_operation_id)?;
+                tx.merge_operation(wc_operation)?;
+                let num_rebased = tx.repo_mut().rebase_descendants()?;
+                if num_rebased > 0 {
+                    writeln!(
+                        ui.status(),
+                        "Rebased {num_rebased} descendant commits onto commits rewritten by \
+                         concurrent operation"
+                    )?;
+                }
+            }
+        }
+
         #[cfg(feature = "git")]
         if self.working_copy_shared_with_git {
             use std::error::Error as _;
@@ -2108,9 +2136,9 @@ See https://jj-vcs.github.io/jj/latest/working-copy/#stale-working-copy \
                 // Export Git HEAD while holding the WC lock to prevent races:
                 // - Between two finish_transaction calls updating HEAD
                 // - With import_git_head importing HEAD concurrently
-                // This can still fail if HEAD was updated concurrently by another JJ process
-                // (overlapping transaction) or a non-JJ process (e.g., git checkout). In that
-                // case, the actual state will be imported on the next snapshot.
+                // This can still fail if HEAD was updated concurrently by a non-JJ process
+                // (e.g., git checkout). In that case, the actual state will be imported on
+                // the next snapshot.
                 match jj_lib::git::reset_head(tx.repo_mut(), wc_commit) {
                     Ok(()) => {}
                     Err(err @ jj_lib::git::GitResetHeadError::UpdateHeadRef(_)) => {
