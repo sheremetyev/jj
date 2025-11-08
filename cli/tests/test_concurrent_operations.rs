@@ -336,6 +336,62 @@ fn test_git_head_race_condition() {
     }
 }
 
+#[test]
+fn test_git_head_overlapping_transactions() {
+    // Test that overlapping transactions handle Git HEAD updates correctly.
+    // This verifies the fix in finish_transaction() that merges with concurrent
+    // operations after acquiring the lock, preventing both divergent operations
+    // and failed Git HEAD updates.
+    //
+    // Scenario:
+    // 1. Process 1 loads repo at operation X and starts a transaction
+    // 2. Process 2 loads repo at operation X and starts a transaction
+    // 3. Process 2 finishes first, updating Git HEAD and creating operation Y
+    // 4. Process 1 finishes, detecting the concurrent update after acquiring the
+    //    lock
+    //
+    // With the fix, Process 1 merges its transaction with operation Y, avoiding
+    // both the "Failed to update Git HEAD ref" warning and divergent operations.
+
+    let test_env = TestEnvironment::default();
+    test_env
+        .run_jj_in(".", ["git", "init", "--colocate", "repo"])
+        .success();
+    let work_dir = test_env.work_dir("repo");
+
+    // Create initial commit structure
+    work_dir.write_file("file1", "content1\n");
+    work_dir.run_jj(["commit", "-m", "commit 1"]).success();
+
+    work_dir.write_file("file2", "content2\n");
+    work_dir.run_jj(["commit", "-m", "commit 2"]).success();
+
+    // Get the current operation ID (this will be the base for both processes)
+    let output = work_dir.run_jj(["op", "log", "--no-graph", "-T", "id", "--limit", "1"]);
+    let base_op_id = output.stdout.raw().trim().to_string();
+
+    // Process 2: Navigate to previous commit (updates Git HEAD, creates operation
+    // Y)
+    work_dir.run_jj(["edit", "@-"]).success();
+
+    // Process 1: Navigate from the old operation (simulates starting before Process
+    // 2 finished) With the fix, this should detect the concurrent update after
+    // acquiring the lock and merge its transaction with the new operation
+    // instead of creating divergent ops.
+    work_dir
+        .run_jj(["edit", "@-", "--at-op", &base_op_id])
+        .success();
+
+    // Verify the commit log shows the expected structure
+    let output = get_log_output(&work_dir);
+    insta::assert_snapshot!(output, @r"
+    @  commit 2
+    ○  commit 1
+    ◆
+    [EOF]
+    ");
+}
+
 #[must_use]
 fn get_log_output(work_dir: &TestWorkDir) -> CommandOutput {
     work_dir.run_jj(["log", "-T", "description"])
