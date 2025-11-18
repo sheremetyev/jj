@@ -228,7 +228,6 @@ fn test_concurrent_snapshot_wc_reloadable() {
 }
 
 #[test]
-#[should_panic(expected = "Race condition detected")]
 fn test_git_head_race_condition() {
     // Test for race condition where concurrent jj processes create divergent
     // operations when importing/exporting Git HEAD. This test spawns two
